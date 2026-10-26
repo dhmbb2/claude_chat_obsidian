@@ -1,0 +1,27 @@
+{
+  "name": "claude-chat-obsidian",
+  "version": "0.1.0",
+  "description": "Obsidian plugin: Claude study guides, a sidebar editing agent, and highlight-anchored side chats.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "check": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/dhmbb2/claude_chat_obsidian.git"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.310",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "obsidian": "^1.14.4",
+    "typescript": "^7.0.2"
+  }
+}

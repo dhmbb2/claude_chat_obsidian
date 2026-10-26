@@ -1,0 +1,10 @@
+{
+  "id": "study-agent",
+  "name": "Study Agent",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Generate study guides with Claude, edit them with a sidebar agent, and ask questions about highlighted passages that stay marked in the note.",
+  "author": "dhmbb2",
+  "authorUrl": "https://github.com/dhmbb2",
+  "isDesktopOnly": true
+}
