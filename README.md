@@ -21,7 +21,7 @@
 
 ## 安装
 
-需要 Node.js 18+，以及已经登录的 [Claude Code](https://code.claude.com) 命令行。
+需要 Node.js 18+，以及已经登录的 [Claude Code](https://code.claude.com) 命令行。选择 Opus 5.5 / Sonnet 5.5 / Haiku 5.5 需要 Claude Code 2.1.280 或更新的版本；版本太旧时插件会提示，运行 `claude update` 即可。
 
 ```bash
 git clone git@github.com:dhmbb2/claude_chat_obsidian.git

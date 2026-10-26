@@ -95,6 +95,12 @@ async function runAgent(cfg: AgentConfig, opts: RunOptions): Promise<string> {
 
 function friendly(message = ""): AgentError {
   if (/not logged in|\/login|invalid api key|authentication/i.test(message)) return new AgentError(NOT_LOGGED_IN);
+  const outdated = message.match(/Claude Code ([\d.]+) does not support this model; version ([\d.]+)/i);
+  if (outdated) {
+    return new AgentError(
+      `本机的 claude 命令行版本太旧（${outdated[1]}），这个模型需要 ${outdated[2]} 或更新。在终端运行 \`claude update\` 后重试，或者先换一个模型。`,
+    );
+  }
   if (/rate.?limit|usage limit|limit reached/i.test(message)) return new AgentError(`用量达到上限：${message}`);
   if (/max.?turns/i.test(message)) return new AgentError("Agent 轮次用完了还没做完，试着把要求拆小一点。");
   return new AgentError(`Agent 出错：${message}`);
