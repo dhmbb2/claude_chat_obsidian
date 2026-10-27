@@ -376,7 +376,8 @@ body {
 /* ---------- dropdown (model / thinking) ---------- */
 .sa-dropdown {
   position: fixed;
-  z-index: calc(var(--layer-popover) + 10);
+  /* menus sit above everything, including dialogs like "新建学习指南" */
+  z-index: calc(var(--layer-menu, 65) + 1);
   min-width: 240px;
   max-width: 300px;
   padding: 6px;

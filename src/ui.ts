@@ -69,7 +69,9 @@ export function showDropdown(anchor: HTMLElement, sections: DropdownSection<any>
   const w = menu.offsetWidth;
   const h = menu.offsetHeight;
   const above = r.top - h - 6 > 8;
-  menu.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`;
+  // line up with the button's left edge; flip to its right edge if that would overflow
+  const left = r.left + w <= window.innerWidth - 8 ? r.left : r.right - w;
+  menu.style.left = `${Math.max(8, left)}px`;
   menu.style.top = `${above ? r.top - h - 6 : Math.min(r.bottom + 6, window.innerHeight - h - 8)}px`;
   menu.addClass("is-open");
   // close on the next outside click
