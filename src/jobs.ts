@@ -23,7 +23,7 @@ export interface GuideJob extends ModelChoice {
 const MAX_JOBS = 30;
 
 export class GuideJobs {
-  private live = new Map<string, { controller: AbortController; progress: Progress | null }>();
+  private live = new Map<string, { controller: AbortController; progress: Progress | null; stopping: boolean }>();
   private unloading = false;
 
   constructor(private plugin: StudyAgentPlugin) {}
@@ -44,6 +44,11 @@ export class GuideJobs {
 
   progress(id: string): Progress | null {
     return this.live.get(id)?.progress ?? null;
+  }
+
+  /** Stop was clicked; the CLI takes a moment to exit. */
+  isStopping(id: string): boolean {
+    return this.live.get(id)?.stopping ?? false;
   }
 
   start(request: string, material: TFile | null, choice: ModelChoice): GuideJob {
@@ -74,7 +79,11 @@ export class GuideJobs {
   }
 
   cancel(id: string) {
-    this.live.get(id)?.controller.abort();
+    const live = this.live.get(id);
+    if (!live || live.stopping) return;
+    live.stopping = true;
+    live.controller.abort();
+    this.plugin.refreshJobs();
   }
 
   remove(id: string) {
@@ -103,7 +112,7 @@ export class GuideJobs {
 
   private async run(job: GuideJob, material: TFile | null) {
     const controller = new AbortController();
-    const live = { controller, progress: null as Progress | null };
+    const live = { controller, progress: null as Progress | null, stopping: false };
     this.live.set(job.id, live);
     this.changed();
     const { app } = this.plugin;

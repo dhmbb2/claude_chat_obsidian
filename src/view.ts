@@ -268,9 +268,12 @@ export class AgentView extends ItemView {
     else setIcon(icon, JOB_ICONS[job.status]);
     head.createDiv({ cls: "sa-job-title", text: job.title });
     const actions = head.createDiv({ cls: "sa-job-actions" });
-    if (job.status === "running") iconButton(actions, "square", "停止生成", () => jobs.cancel(job.id));
-    else if (job.status !== "done") iconButton(actions, "rotate-cw", "重新生成", () => jobs.retry(job));
-    if (job.status !== "running") iconButton(actions, "x", "从列表移除", () => jobs.remove(job.id));
+    if (job.status === "running") {
+      if (!jobs.isStopping(job.id)) iconButton(actions, "circle-stop", "停止生成", () => jobs.cancel(job.id));
+    } else {
+      if (job.status !== "done") iconButton(actions, "rotate-cw", "重新生成", () => jobs.retry(job));
+      iconButton(actions, "x", "从列表移除", () => jobs.remove(job.id));
+    }
 
     const status = item.createDiv({ cls: "sa-job-status" });
     if (job.status === "running") {
@@ -285,7 +288,7 @@ export class AgentView extends ItemView {
     const material = job.materialPath ? ` · 材料：${job.materialPath.split("/").pop()}` : "";
     item.createDiv({
       cls: "sa-thread-meta",
-      text: `${formatTime(job.startedAt)} · ${modelLabel(job.model)} · 思考${effortLabel(job.effort)}${took}${material}`,
+      text: `${formatTime(job.startedAt)} · ${modelLabel(job.model)} · 思考力度 ${effortLabel(job.effort)}${took}${material}`,
     });
 
     if (job.status === "done" && job.notePath) {
@@ -299,6 +302,7 @@ export class AgentView extends ItemView {
   }
 
   private liveLine(id: string, startedAt: string): string {
+    if (this.plugin.jobs.isStopping(id)) return "正在停止…";
     return `${progressText(this.plugin.jobs.progress(id))} · ${duration(Date.now() - Date.parse(startedAt))}`;
   }
 
