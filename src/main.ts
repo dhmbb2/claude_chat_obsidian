@@ -4,6 +4,7 @@ import { findClaude, type AgentConfig, type ChatMessage, type Effort } from "./a
 import { anchorFromRange, blockOf, locateAnchor, markAnchor, unmark, type Anchor } from "./anchors";
 import { anchorFromEditor, anchorFromSource, editorView, marksExtension, refreshAllEditors } from "./editor";
 import { closeDropdown } from "./ui";
+import { GuideJobs, type GuideJob } from "./jobs";
 import { NewGuideModal } from "./modal";
 import { project } from "./plaintext";
 import { SideChat, visibleMarks } from "./sidechat";
@@ -40,6 +41,7 @@ interface PluginData {
   threads: Record<string, Thread[]>; // by note path
   chats: Record<string, ChatEntry[]>; // main-agent conversation, by note path
   undo: Record<string, string[]>; // note content before each agent edit, by note path
+  jobs: GuideJob[]; // study-guide generations, newest first
 }
 
 interface Selected {
@@ -67,6 +69,8 @@ const MAX_UNDO = 10;
 
 export default class StudyAgentPlugin extends Plugin {
   data!: PluginData;
+  jobs!: GuideJobs;
+  private jobsStatus!: HTMLElement;
   private sideChat!: SideChat;
   private askBtn!: HTMLElement;
   private selection: Selected | null = null;
@@ -79,7 +83,9 @@ export default class StudyAgentPlugin extends Plugin {
       threads: saved.threads ?? {},
       chats: saved.chats ?? {},
       undo: saved.undo ?? {},
+      jobs: GuideJobs.restore(saved.jobs),
     };
+    this.jobs = new GuideJobs(this);
     if (!this.data.settings.claudePath) this.data.settings.claudePath = findClaude();
 
     this.registerView(VIEW_TYPE, (leaf) => new AgentView(leaf, this));
@@ -88,6 +94,14 @@ export default class StudyAgentPlugin extends Plugin {
     this.addRibbonIcon("messages-square", "打开学习助手侧边栏", () => this.revealAgentView());
     this.addCommand({ id: "new-guide", name: "新建学习指南", callback: () => this.openNewGuide() });
     this.addCommand({ id: "open-agent", name: "打开学习助手侧边栏", callback: () => this.revealAgentView() });
+    this.addCommand({ id: "show-jobs", name: "查看学习指南的生成进度", callback: () => this.showJobs() });
+
+    // Status bar: how many guides are being written; click for the 生成 tab.
+    this.jobsStatus = this.addStatusBarItem();
+    this.jobsStatus.addClass("sa-root", "sa-jobs-status", "mod-clickable");
+    this.jobsStatus.onclick = () => this.showJobs();
+    this.renderJobsStatus();
+    this.register(() => this.jobs.stopAll());
     this.addCommand({
       id: "ask-selection",
       name: "对选中文字提问",
@@ -194,6 +208,7 @@ export default class StudyAgentPlugin extends Plugin {
             delete table[oldPath];
           }
         }
+        this.jobs.notePathRenamed(oldPath, file.path);
         this.save();
       }),
     );
@@ -450,6 +465,29 @@ export default class StudyAgentPlugin extends Plugin {
   refreshViews() {
     // A sidebar leaf that has never been shown holds a deferred placeholder view.
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) if (leaf.view instanceof AgentView) leaf.view.renderThreads();
+  }
+
+  // ---------- guide generation ----------
+
+  /** Redraw everything that shows generation jobs. */
+  refreshJobs() {
+    this.renderJobsStatus();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) if (leaf.view instanceof AgentView) leaf.view.renderJobs();
+  }
+
+  private renderJobsStatus() {
+    const n = this.jobs.runningCount;
+    this.jobsStatus.toggle(n > 0);
+    this.jobsStatus.empty();
+    if (!n) return;
+    setIcon(this.jobsStatus.createSpan({ cls: "sa-spark" }), "sparkle");
+    this.jobsStatus.createSpan({ text: `正在生成 ${n} 篇学习指南` });
+  }
+
+  async showJobs() {
+    await this.revealAgentView();
+    const view = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0]?.view;
+    if (view instanceof AgentView) view.showJobs();
   }
 
   async revealAgentView() {

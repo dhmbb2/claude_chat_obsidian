@@ -1,19 +1,22 @@
-// Right-sidebar view: the main agent for the active note, plus the list of
-// questions asked on it.
+// Right-sidebar view: the main agent for the active note, the list of questions
+// asked on it, and the study guides being generated.
 import { Component, ItemView, MarkdownRenderer, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
-import { editorTurn, type Quote } from "./agent";
-import { choicePicker, Composer, iconButton, thinking } from "./ui";
+import { editorTurn, type Progress, type Quote } from "./agent";
+import type { GuideJob } from "./jobs";
+import { choicePicker, Composer, effortLabel, iconButton, modelLabel, thinking } from "./ui";
 import type StudyAgentPlugin from "./main";
 import type { ChatEntry } from "./main";
 
 export const VIEW_TYPE = "study-agent";
+
+type Tab = "chat" | "threads" | "jobs";
 
 const SUGGESTIONS = ["加一个具体的数值例子", "用更直观的比喻重写第 1 节", "把我的划线提问整理进正文", "在结尾补 3 道练习题"];
 
 export class AgentView extends ItemView {
   ready = false;
   private file: TFile | null = null;
-  private tab: "chat" | "threads" = "chat";
+  private tab: Tab = "chat";
   private busyPath: string | null = null;
   private renderComponent = new Component();
   private titleEl!: HTMLElement;
@@ -23,6 +26,9 @@ export class AgentView extends ItemView {
   private chatPane!: HTMLElement;
   private logEl!: HTMLElement;
   private threadsEl!: HTMLElement;
+  private jobsTab!: HTMLElement;
+  private jobsEl!: HTMLElement;
+  private liveJobs: { id: string; startedAt: string; el: HTMLElement }[] = []; // running jobs' status lines
   private composer!: Composer;
   private quotes: Quote[] = []; // passages quoted into the next message
 
@@ -62,8 +68,10 @@ export class AgentView extends ItemView {
     const tabs = head.createDiv({ cls: "sa-tabs" });
     this.chatTab = tabs.createDiv({ cls: "sa-tab", text: "对话" });
     this.threadsTab = tabs.createDiv({ cls: "sa-tab" });
+    this.jobsTab = tabs.createDiv({ cls: "sa-tab" });
     this.chatTab.onclick = () => this.setTab("chat");
     this.threadsTab.onclick = () => this.setTab("threads");
+    this.jobsTab.onclick = () => this.setTab("jobs");
 
     this.chatPane = root.createDiv({ cls: "sa-pane" });
     this.logEl = this.chatPane.createDiv({ cls: "sa-log" });
@@ -81,6 +89,8 @@ export class AgentView extends ItemView {
     );
 
     this.threadsEl = root.createDiv({ cls: "sa-pane sa-thread-list" });
+    this.jobsEl = root.createDiv({ cls: "sa-pane sa-thread-list sa-job-list" });
+    this.registerInterval(window.setInterval(() => this.tickJobs(), 1000));
 
     this.addChild(this.renderComponent);
     this.registerEvent(this.app.workspace.on("file-open", () => this.syncFile()));
@@ -109,15 +119,23 @@ export class AgentView extends ItemView {
     this.titleEl.setText(this.file ? this.file.basename : "学习助手");
     this.renderChat();
     this.renderThreads();
+    this.renderJobs();
     this.setTab(this.tab);
   }
 
-  private setTab(tab: "chat" | "threads") {
+  private setTab(tab: Tab) {
     this.tab = tab;
     this.chatTab.toggleClass("is-active", tab === "chat");
     this.threadsTab.toggleClass("is-active", tab === "threads");
+    this.jobsTab.toggleClass("is-active", tab === "jobs");
     this.chatPane.toggle(tab === "chat");
     this.threadsEl.toggle(tab === "threads");
+    this.jobsEl.toggle(tab === "jobs");
+  }
+
+  showJobs() {
+    this.tab = "jobs";
+    if (this.ready) this.setTab("jobs");
   }
 
   private openMenu() {
@@ -211,6 +229,82 @@ export class AgentView extends ItemView {
       item.createDiv({ cls: "sa-thread-meta", text: `${questions.length} 个问题 · ${formatDate(t.createdAt)}` });
       item.onclick = () => this.plugin.revealThread(path!, t.id);
     }
+  }
+
+  renderJobs() {
+    if (!this.ready) return;
+    const jobs = this.plugin.jobs.list;
+    const running = this.plugin.jobs.runningCount;
+    this.jobsTab.empty();
+    this.jobsTab.appendText("生成");
+    if (running) this.jobsTab.createSpan({ cls: "sa-count sa-count-live", text: String(running) });
+    this.jobsEl.empty();
+    this.liveJobs = [];
+
+    const bar = this.jobsEl.createDiv({ cls: "sa-job-bar" });
+    const create = bar.createDiv({ cls: "sa-job-new" });
+    setIcon(create.createSpan({ cls: "sa-job-new-icon" }), "plus");
+    create.createSpan({ text: "新建学习指南" });
+    create.onclick = () => this.plugin.openNewGuide();
+    if (jobs.some((j) => j.status !== "running")) {
+      bar.createDiv({ cls: "sa-job-clear", text: "清除已结束" }).onclick = () => this.plugin.jobs.clearFinished();
+    }
+
+    if (!jobs.length) {
+      const box = this.jobsEl.createDiv({ cls: "sa-greeting" });
+      box.createDiv({ cls: "sa-greeting-title", text: "还没有生成任务" });
+      box.createDiv({ cls: "sa-greeting-desc", text: "新建学习指南后，可以在这里看它是在写、写好了，还是中途出了错。" });
+      return;
+    }
+    for (const job of jobs) this.renderJob(job);
+  }
+
+  private renderJob(job: GuideJob) {
+    const jobs = this.plugin.jobs;
+    const item = this.jobsEl.createDiv({ cls: `sa-thread sa-job is-${job.status}` });
+    const head = item.createDiv({ cls: "sa-job-head" });
+    const icon = head.createSpan({ cls: "sa-job-icon" });
+    if (job.status === "running") setIcon(icon.createSpan({ cls: "sa-spark" }), "sparkle");
+    else setIcon(icon, JOB_ICONS[job.status]);
+    head.createDiv({ cls: "sa-job-title", text: job.title });
+    const actions = head.createDiv({ cls: "sa-job-actions" });
+    if (job.status === "running") iconButton(actions, "square", "停止生成", () => jobs.cancel(job.id));
+    else if (job.status !== "done") iconButton(actions, "rotate-cw", "重新生成", () => jobs.retry(job));
+    if (job.status !== "running") iconButton(actions, "x", "从列表移除", () => jobs.remove(job.id));
+
+    const status = item.createDiv({ cls: "sa-job-status" });
+    if (job.status === "running") {
+      this.liveJobs.push({ id: job.id, startedAt: job.startedAt, el: status });
+      status.setText(this.liveLine(job.id, job.startedAt));
+    } else if (job.status === "failed") {
+      status.setText(job.error ?? "生成失败");
+    } else {
+      status.setText(JOB_STATUS[job.status]);
+    }
+    const took = job.finishedAt ? ` · 用时 ${duration(Date.parse(job.finishedAt) - Date.parse(job.startedAt))}` : "";
+    const material = job.materialPath ? ` · 材料：${job.materialPath.split("/").pop()}` : "";
+    item.createDiv({
+      cls: "sa-thread-meta",
+      text: `${formatTime(job.startedAt)} · ${modelLabel(job.model)} · 思考${effortLabel(job.effort)}${took}${material}`,
+    });
+
+    if (job.status === "done" && job.notePath) {
+      item.addClass("is-clickable");
+      item.onclick = () => {
+        const file = this.app.vault.getAbstractFileByPath(job.notePath!);
+        if (file instanceof TFile) this.app.workspace.getLeaf(false).openFile(file);
+        else new Notice("这篇学习指南已经被移动或删除了。");
+      };
+    }
+  }
+
+  private liveLine(id: string, startedAt: string): string {
+    return `${progressText(this.plugin.jobs.progress(id))} · ${duration(Date.now() - Date.parse(startedAt))}`;
+  }
+
+  /** Every second: elapsed time and progress of the running jobs. */
+  private tickJobs() {
+    for (const j of this.liveJobs) j.el.setText(this.liveLine(j.id, j.startedAt));
   }
 
   private greeting(title: string, desc: string): HTMLElement {
@@ -328,6 +422,39 @@ export class AgentView extends ItemView {
     await this.plugin.save();
     this.renderChat();
   }
+}
+
+const JOB_ICONS: Record<Exclude<GuideJob["status"], "running">, string> = {
+  done: "circle-check",
+  failed: "circle-alert",
+  interrupted: "circle-pause",
+  cancelled: "circle-slash",
+};
+
+const JOB_STATUS: Record<"done" | "interrupted" | "cancelled", string> = {
+  done: "已完成，点击打开",
+  interrupted: "没有写完：Obsidian 或插件在生成途中被关闭了",
+  cancelled: "已停止",
+};
+
+function progressText(p: Progress | null): string {
+  if (!p) return "正在启动";
+  if (p.phase === "thinking") return "正在思考";
+  if (p.phase === "reading") return "正在读材料";
+  if (p.phase === "fetching") return "正在读网页";
+  return `正在写 · ${p.chars.toLocaleString()} 字`;
+}
+
+function duration(ms: number) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function formatTime(iso: string) {
+  const d = new Date(iso);
+  const today = new Date().toDateString() === d.toDateString();
+  const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return today ? hm : `${formatDate(iso)} ${hm}`;
 }
 
 function formatDate(iso: string) {

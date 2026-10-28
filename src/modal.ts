@@ -1,15 +1,12 @@
 // "New study guide" dialog: a topic / pasted text / link, optionally with the
-// open note or PDF as material. The result is saved as a normal Markdown note.
-import { Modal, Notice, normalizePath, setIcon, TFile } from "obsidian";
-import { generateGuide, type GuideSource } from "./agent";
-import { choicePicker, Composer, thinking } from "./ui";
+// open note or PDF as material. Generation runs as a background job (jobs.ts).
+import { Modal, setIcon, TFile } from "obsidian";
+import { choicePicker, Composer } from "./ui";
 import type StudyAgentPlugin from "./main";
 
 const MATERIAL_EXTENSIONS = ["md", "txt", "pdf"];
 
 export class NewGuideModal extends Modal {
-  private busy = false;
-
   constructor(private plugin: StudyAgentPlugin) {
     super(plugin.app);
   }
@@ -48,72 +45,25 @@ export class NewGuideModal extends Modal {
         chip.toggleClass("is-on", useMaterial);
       };
     }
-    options.createDiv({ cls: "sa-new-folder", text: `保存到 ${s.guideFolder || "/"}` });
+    options.createDiv({ cls: "sa-new-folder", text: `保存到 ${s.guideFolder || "/"} · 在侧边栏「生成」里看进度` });
 
     const status = contentEl.createDiv({ cls: "sa-new-status" });
     composer.focus();
   }
 
-  private async generate(composer: Composer, status: HTMLElement, material: TFile | null) {
+  /** Hand the request to a background job; its progress shows in the sidebar's 生成 tab. */
+  private generate(composer: Composer, status: HTMLElement, material: TFile | null) {
     const request = composer.value;
-    if (this.busy) return;
     if (!request.trim() && !material) {
       status.setText("先写一个主题，或者选上「作为材料」。");
       status.addClass("is-error");
       composer.focus();
       return;
     }
-    this.busy = true;
-    composer.setBusy(true);
-    status.removeClass("is-error");
-    status.empty();
-    const row = thinking(status, "");
-    const label = row.querySelector(".sa-thinking-label")!;
-    const started = Date.now();
-    const tick = () =>
-      (label.textContent = `正在写学习指南 · ${Math.round((Date.now() - started) / 1000)}s　通常 1–3 分钟，可以先关掉窗口，好了会自动打开`);
-    tick();
-    const timer = window.setInterval(tick, 1000);
-    try {
-      const src: GuideSource = { request };
-      if (material) {
-        src.material =
-          material.extension === "pdf"
-            ? { name: material.name, pdf: await this.app.vault.readBinary(material) }
-            : { name: material.name, text: await this.app.vault.read(material) };
-      }
-      const s = this.plugin.data.settings;
-      const markdown = await generateGuide(this.plugin.agentConfig(), { model: s.guideModel, effort: s.guideEffort }, src);
-      const file = await this.save(markdown, request, material);
-      this.close();
-      await this.app.workspace.getLeaf(false).openFile(file);
-      this.plugin.revealAgentView();
-      new Notice(`学习指南已生成：${file.basename}`);
-    } catch (err) {
-      status.empty();
-      status.addClass("is-error");
-      status.setText((err as Error).message);
-      new Notice(`生成失败：${(err as Error).message}`, 8000);
-    } finally {
-      window.clearInterval(timer);
-      this.busy = false;
-      composer.setBusy(false);
-    }
-  }
-
-  private async save(markdown: string, request: string, material: TFile | null): Promise<TFile> {
-    const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || "学习指南";
-    const folder = normalizePath(this.plugin.data.settings.guideFolder || "/");
-    if (folder !== "/" && !this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
-    const base = title.replace(/[\\/:*?"<>|#^[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "学习指南";
-    let path = normalizePath(`${folder}/${base}.md`);
-    for (let i = 2; this.app.vault.getAbstractFileByPath(path); i++) path = normalizePath(`${folder}/${base} ${i}.md`);
-
-    const source = material ? `"[[${material.path}]]"` : JSON.stringify(request.trim().split("\n")[0].slice(0, 120));
-    const frontmatter = `---\ntags:\n  - study-guide\nsource: ${source}\n---\n\n`;
-    // The file name carries the title (Obsidian shows it as the inline title), so drop the H1.
-    const body = markdown.replace(/^#\s+.+\n+/, "");
-    return this.app.vault.create(path, frontmatter + body);
+    const s = this.plugin.data.settings;
+    this.plugin.jobs.start(request, material, { model: s.guideModel, effort: s.guideEffort });
+    this.close();
+    this.plugin.showJobs();
   }
 
   onClose() {

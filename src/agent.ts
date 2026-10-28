@@ -33,6 +33,14 @@ export interface ChatMessage {
 }
 
 export class AgentError extends Error {}
+/** The run was stopped through its AbortSignal. */
+export class CancelledError extends AgentError {}
+
+/** What a long run is doing right now, for progress displays. */
+export interface Progress {
+  phase: "thinking" | "reading" | "fetching" | "writing";
+  chars: number; // text written so far in the current reply
+}
 
 interface RunOptions extends ModelChoice {
   system: string;
@@ -41,6 +49,8 @@ interface RunOptions extends ModelChoice {
   mcpServers?: Record<string, ReturnType<typeof createSdkMcpServer>>;
   maxTurns?: number;
   cwd?: string;
+  signal?: AbortSignal;
+  onProgress?: (p: Progress) => void;
 }
 
 const NOT_LOGGED_IN = "Claude Code 还没登录：在终端运行 `claude auth login`（Pro/Max 账号），然后重试。";
@@ -60,8 +70,13 @@ async function runAgent(cfg: AgentConfig, opts: RunOptions): Promise<string> {
   if (!cfg.claudePath || !fs.existsSync(cfg.claudePath)) {
     throw new AgentError("找不到 claude 命令行。请在插件设置里填写它的路径（终端运行 `which claude` 可以查到）。");
   }
-  const { system, prompt, model, effort, tools = [], mcpServers, maxTurns = 1, cwd = scratchDir() } = opts;
+  const { system, prompt, model, effort, tools = [], mcpServers, maxTurns = 1, cwd = scratchDir(), signal, onProgress } = opts;
+  if (signal?.aborted) throw new CancelledError("已取消");
+  const abortController = new AbortController();
+  const abort = () => abortController.abort();
+  signal?.addEventListener("abort", abort);
   let result: any;
+  let chars = 0;
   try {
     for await (const m of query({
       prompt,
@@ -76,16 +91,34 @@ async function runAgent(cfg: AgentConfig, opts: RunOptions): Promise<string> {
         persistSession: false,
         maxTurns,
         effort,
+        abortController,
+        ...(onProgress ? { includePartialMessages: true } : {}),
         cwd,
         env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: "obsidian-study-agent/0.1.0" },
         ...(model ? { model } : {}),
       },
     })) {
       if (m.type === "result") result = m;
+      else if (m.type === "stream_event" && onProgress) {
+        const e = m.event;
+        if (e.type === "message_start") chars = 0;
+        else if (e.type === "content_block_start") {
+          const block = e.content_block;
+          if (block.type === "thinking") onProgress({ phase: "thinking", chars });
+          else if (block.type === "tool_use") onProgress({ phase: block.name === "WebFetch" ? "fetching" : "reading", chars });
+        } else if (e.type === "content_block_delta" && e.delta.type === "text_delta") {
+          chars += e.delta.text.length;
+          onProgress({ phase: "writing", chars });
+        }
+      }
     }
   } catch (err) {
+    if (signal?.aborted) throw new CancelledError("已取消");
     if (!result) throw friendly((err as Error).message);
+  } finally {
+    signal?.removeEventListener("abort", abort);
   }
+  if (signal?.aborted) throw new CancelledError("已取消");
   if (!result) throw new AgentError("Agent 没有返回结果。");
   if (result.is_error || result.subtype !== "success") {
     throw friendly(result.result || result.errors?.join("; ") || result.subtype);
@@ -145,7 +178,12 @@ export interface GuideSource {
   material?: { name: string; text?: string; pdf?: ArrayBuffer };
 }
 
-export async function generateGuide(cfg: AgentConfig, choice: ModelChoice, src: GuideSource): Promise<string> {
+export async function generateGuide(
+  cfg: AgentConfig,
+  choice: ModelChoice,
+  src: GuideSource,
+  run: { signal?: AbortSignal; onProgress?: (p: Progress) => void } = {},
+): Promise<string> {
   const tools: string[] = [];
   let cwd: string | undefined;
   let attachment = "";
@@ -166,7 +204,7 @@ export async function generateGuide(cfg: AgentConfig, choice: ModelChoice, src: 
     : "Create a study guide from the material above.";
 
   try {
-    const text = await runAgent(cfg, { ...choice, system: GUIDE_SYSTEM, prompt: attachment + request, tools, maxTurns: 12, cwd });
+    const text = await runAgent(cfg, { ...choice, system: GUIDE_SYSTEM, prompt: attachment + request, tools, maxTurns: 12, cwd, ...run });
     return text.replace(/^```(?:markdown|md)?\s*\n/, "").replace(/\n```\s*$/, "").trim() + "\n";
   } finally {
     if (cwd) fs.rmSync(cwd, { recursive: true, force: true });

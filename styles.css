@@ -817,6 +817,128 @@ body {
   color: var(--sa-faint);
 }
 
+/* generation jobs */
+.sa-count-live {
+  color: var(--sa-accent);
+}
+.sa-job-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sa-job-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 5px 9px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  color: var(--sa-text-2);
+  background: var(--sa-surface);
+  border: 0.5px solid var(--sa-border-strong);
+  cursor: pointer;
+}
+.sa-job-new:hover {
+  background: var(--sa-sunken);
+}
+.sa-job-new-icon,
+.sa-job-new-icon svg {
+  display: flex;
+  width: 14px;
+  height: 14px;
+}
+.sa-job-clear {
+  font-size: 12px;
+  color: var(--sa-faint);
+  cursor: pointer;
+}
+.sa-job-clear:hover {
+  color: var(--sa-text);
+}
+.sa-job {
+  cursor: default;
+}
+.sa-job:not(.is-clickable):hover {
+  border-color: var(--sa-border-strong);
+  box-shadow: none;
+}
+.sa-job.is-clickable {
+  cursor: pointer;
+}
+.sa-job-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sa-job-icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--sa-faint);
+}
+.sa-job-icon svg {
+  width: 16px;
+  height: 16px;
+}
+.sa-job.is-done .sa-job-icon {
+  color: var(--color-green, #3f8f5a);
+}
+.sa-job.is-failed .sa-job-icon {
+  color: var(--text-error);
+}
+.sa-job.is-interrupted .sa-job-icon {
+  color: var(--color-orange, #c98a2c);
+}
+.sa-job-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--sa-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-job-actions {
+  display: flex;
+  margin: -4px -6px -4px 0;
+}
+.sa-job-actions .sa-icon-btn {
+  width: 24px;
+  height: 24px;
+}
+.sa-job-actions .sa-icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.sa-job-status {
+  margin: 6px 0 0 24px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--sa-text-2);
+  font-variant-numeric: tabular-nums;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  user-select: text;
+}
+.sa-job.is-failed .sa-job-status {
+  color: var(--text-error);
+}
+.sa-job .sa-thread-meta {
+  margin-left: 24px;
+}
+.sa-jobs-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.sa-jobs-status .sa-spark svg {
+  width: 12px;
+  height: 12px;
+}
+
 /* ---------- new-guide dialog ---------- */
 .modal.sa-new-modal {
   width: min(640px, 92vw);
