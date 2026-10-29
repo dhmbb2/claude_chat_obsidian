@@ -193,7 +193,7 @@ export class AgentView extends ItemView {
   private appendMessage(m: ChatEntry, canUndo: boolean) {
     const row = this.logEl.createDiv({ cls: `sa-msg sa-${m.role}` });
     if (m.role === "user") {
-      for (const q of m.quotes ?? []) row.createDiv({ cls: "sa-msg-quote", text: q.exact });
+      for (const q of m.quotes ?? []) row.createDiv({ cls: "sa-msg-quote", text: q.exact.replace(/\s+/g, " ") });
       row.createDiv({ cls: "sa-bubble", text: m.text });
       return;
     }
@@ -218,12 +218,12 @@ export class AgentView extends ItemView {
     if (!threads.length) {
       const box = this.threadsEl.createDiv({ cls: "sa-greeting" });
       box.createDiv({ cls: "sa-greeting-title", text: "还没有划线提问" });
-      box.createDiv({ cls: "sa-greeting-desc", text: "在笔记里选中一段文字，点「问 Claude」。问过的地方会留下灰色虚线，点一下就能回到这次对话。" });
+      box.createDiv({ cls: "sa-greeting-desc", text: "在笔记里选中一段文字（可以跨过公式和表格），点「问 Claude」。问过的段落左边会出现一个小标记，点一下就能回到这次对话。" });
       return;
     }
     for (const t of [...threads].reverse()) {
       const item = this.threadsEl.createDiv({ cls: "sa-thread" });
-      item.createDiv({ cls: "sa-thread-quote", text: t.anchor.exact });
+      item.createDiv({ cls: "sa-thread-quote", text: t.anchor.exact.replace(/\s+/g, " ") });
       const questions = t.messages.filter((m) => m.role === "user");
       item.createDiv({ cls: "sa-thread-q", text: questions.at(-1)?.text ?? "" });
       item.createDiv({ cls: "sa-thread-meta", text: `${questions.length} 个问题 · ${formatDate(t.createdAt)}` });
@@ -339,7 +339,7 @@ export class AgentView extends ItemView {
     box.empty();
     this.quotes.forEach((q, i) => {
       const chip = box.createDiv({ cls: "sa-quote-chip" });
-      chip.createDiv({ cls: "sa-quote-chip-text", text: q.exact });
+      chip.createDiv({ cls: "sa-quote-chip-text", text: q.exact.replace(/\s+/g, " ") });
       iconButton(chip, "x", "移除这段引用", () => {
         this.quotes.splice(i, 1);
         this.renderQuotes();

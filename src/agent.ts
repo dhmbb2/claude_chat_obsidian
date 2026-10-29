@@ -222,7 +222,7 @@ When the learner asks for a change, make it with the tools:
 Keep the note's conventions (Obsidian callouts, $ / $$ math, headings). Keep any YAML frontmatter as it is.
 The learner has questions anchored to exact passages of the note (listed in <threads>). Keep the wording of passages you are not asked to change, so those anchors survive. When the learner asks you to fold their questions into the note, use those threads.
 
-The learner may quote passages of the note (in <quoted_passages>, with a little text before and after each). When they say "this" / "这段" / "这里", they mean those passages. Quotes are the text as rendered, without Markdown syntax (no **, $, [[ ]], callout markers), so match them against the Markdown loosely and copy the real Markdown into edit_note.
+The learner may quote passages of the note (in <quoted_passages>, with a little text before and after each). When they say "this" / "这段" / "这里", they mean those passages. Quotes are copied from the note's Markdown, formulas and tables included, so they can usually go into edit_note as they are; quotes from older conversations may be rendered text without Markdown syntax, so match those loosely.
 
 If the learner only asks a question, answer it without editing. After editing, reply with one or two sentences saying what you changed. Reply in the learner's language.`;
 
@@ -278,7 +278,7 @@ export async function editorTurn(
 
 // ---------- side chat (question about a highlighted passage) ----------
 
-const SIDE_SYSTEM = `You are a tutor answering questions about one passage the learner highlighted in their study note. The full note is in <note> for context and the highlighted passage is in <highlight>.
+const SIDE_SYSTEM = `You are a tutor answering questions about one passage the learner highlighted in their study note. The full note is in <note> for context and the highlighted passage is in <highlight>, as the note's Markdown (formulas, tables and callouts included).
 
 Answer the latest question about the highlight directly and briefly (usually under 150 words): explain, give an intuition or a tiny example, and point out a common confusion if relevant. Use Markdown; math with $...$ and $$...$$. Reply in the learner's language.`;
 

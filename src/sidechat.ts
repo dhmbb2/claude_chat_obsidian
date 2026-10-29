@@ -1,10 +1,10 @@
 // The floating side-chat card: ask about a highlighted passage, or reopen
-// the questions already asked about a dashed mark. It can be moved (drag the
+// the questions already asked about it from its left-margin marker. It can be moved (drag the
 // top bar; double-click it to snap back next to the passage) and resized from
 // its right / bottom edges; both are remembered.
 import { Component, MarkdownRenderer, TFile } from "obsidian";
 import { sideChatReply, type ChatMessage } from "./agent";
-import { markAnchor, unmark, type Anchor } from "./anchors";
+import type { Anchor } from "./anchors";
 import { choicePicker, Composer, iconButton, thinking } from "./ui";
 import type StudyAgentPlugin from "./main";
 
@@ -12,7 +12,6 @@ interface OpenState {
   path: string;
   threadId: string | null; // null until the first question is answered
   anchor: Anchor;
-  pending: HTMLElement[]; // temporary DOM mark for a passage with no thread yet
   fallback: { left: number; top: number; bottom: number } | null; // where the selection was
   orphan: boolean;
 }
@@ -38,7 +37,7 @@ export class SideChat {
 
     this.barEl = this.el.createDiv({ cls: "sa-card-bar", attr: { title: "拖动移动 · 双击贴回原文" } });
     this.quoteEl = this.barEl.createDiv({ cls: "sa-quote" });
-    this.quoteEl.onclick = () => this.quoteEl.toggleClass("is-full", !this.quoteEl.hasClass("is-full"));
+    this.quoteEl.onclick = () => this.renderQuote(!this.quoteEl.hasClass("is-full"));
     this.deleteBtn = iconButton(this.barEl, "trash-2", "删除这条提问记录", () => this.deleteThread());
     iconButton(this.barEl, "x", "关闭（Esc）", () => this.close());
     this.makeMovable();
@@ -72,17 +71,11 @@ export class SideChat {
     return this.el.contains(node);
   }
 
-  /**
-   * A fresh selection: show it as pending and wait for the first question.
-   * `block` is the rendered element to mark (reading view, or a rendered
-   * callout/table in editing view); for plain editor text the pending mark is
-   * an editor decoration the plugin draws.
-   */
-  openNew(path: string, anchor: Anchor, block: HTMLElement | null, fallback: OpenState["fallback"]) {
+  /** A fresh selection: mark it as pending and wait for the first question. */
+  openNew(path: string, anchor: Anchor, fallback: OpenState["fallback"]) {
     this.close();
-    const pending = block ? markAnchor(block, anchor, () => createSpan({ cls: "sa-mark sa-pending" })) : [];
-    this.state = { path, threadId: null, anchor, pending, fallback, orphan: false };
-    if (!block) this.plugin.setPending({ path, anchor });
+    this.state = { path, threadId: null, anchor, fallback, orphan: false };
+    this.plugin.setPending({ path, anchor });
     this.render([]);
   }
 
@@ -92,7 +85,7 @@ export class SideChat {
     if (!thread) return;
     this.close();
     const orphan = !this.marksFor(threadId).length;
-    const state: OpenState = { path, threadId, anchor: thread.anchor, pending: [], fallback: null, orphan };
+    const state: OpenState = { path, threadId, anchor: thread.anchor, fallback: null, orphan };
     this.state = state;
     this.render(thread.messages);
     this.plugin.setActiveMark(threadId);
@@ -110,7 +103,6 @@ export class SideChat {
 
   close() {
     if (!this.state) return;
-    unmark(this.state.pending);
     if (!this.state.threadId) this.plugin.setPending(null);
     this.state = null;
     this.component?.unload();
@@ -140,20 +132,21 @@ export class SideChat {
     const height = this.el.offsetHeight;
     let left: number;
     let top: number;
-    const target =
-      s.pending.find((e) => e.isConnected) ??
-      (s.threadId ? this.marksFor(s.threadId)[0] : visibleMarks(".sa-mark.sa-pending")[0]);
+    // the passage's marker: one per block it spans in reading view
+    const marks = s.threadId ? this.marksFor(s.threadId) : [];
     if (settings.sideLeft !== null && settings.sideTop !== null) {
       left = settings.sideLeft;
       top = settings.sideTop;
-    } else if (target?.isConnected) {
-      const r = target.getBoundingClientRect();
+    } else if (marks.length) {
+      const rects = marks.map((m) => m.getBoundingClientRect());
+      const r = { left: Math.max(...rects.map((x) => x.right)) + 8, top: Math.min(...rects.map((x) => x.top)), bottom: Math.max(...rects.map((x) => x.bottom)) };
       left = r.left;
       top = r.bottom + 10;
       if (top + height > window.innerHeight - 12 && r.top - height - 10 > 12) top = r.top - height - 10;
     } else if (s.fallback) {
       left = s.fallback.left - width / 2;
       top = s.fallback.bottom + 10;
+      if (top + height > window.innerHeight - 12 && s.fallback.top - height - 10 > 12) top = s.fallback.top - height - 10;
     } else {
       const r = (this.plugin.activeNoteView()?.contentEl ?? document.body).getBoundingClientRect();
       left = r.left + (r.width - width) / 2;
@@ -241,7 +234,7 @@ export class SideChat {
   }
 
   private marksFor(threadId: string): HTMLElement[] {
-    return visibleMarks(`.sa-mark[data-tid="${threadId}"]`);
+    return visibleMarks(`.sa-gm[data-tid="${threadId}"]`);
   }
 
   // ---------- content ----------
@@ -252,8 +245,7 @@ export class SideChat {
     this.component = new Component();
     this.component.load();
 
-    this.quoteEl.setText(s.anchor.exact);
-    this.quoteEl.removeClass("is-full");
+    this.renderQuote(false);
     this.noticeEl.setText("这段原文现在不在屏幕上，或已经被修改过。");
     this.noticeEl.toggle(s.orphan);
     this.deleteBtn.toggle(!!s.threadId);
@@ -269,6 +261,16 @@ export class SideChat {
     this.position();
     this.bodyEl.scrollTop = this.bodyEl.scrollHeight;
     this.composer.focus();
+  }
+
+  /** The passage: one line of its Markdown, or rendered in full (formulas and tables too) when expanded. */
+  private renderQuote(full: boolean) {
+    const s = this.state;
+    if (!s) return;
+    this.quoteEl.empty();
+    this.quoteEl.toggleClass("is-full", full);
+    if (full) MarkdownRenderer.render(this.plugin.app, s.anchor.exact, this.quoteEl.createDiv({ cls: "markdown-rendered" }), s.path, this.component!);
+    else this.quoteEl.setText(s.anchor.exact.replace(/\s+/g, " "));
   }
 
   private renderMessage(m: ChatMessage): HTMLElement {
@@ -318,12 +320,7 @@ export class SideChat {
         await this.plugin.appendToThread(s.path, s.threadId, turn);
       } else {
         const thread = await this.plugin.addThread(s.path, s.anchor, turn);
-        // The pending mark becomes the thread's permanent dashed mark.
-        for (const span of s.pending) {
-          span.removeClass("sa-pending");
-          this.plugin.decorateMark(span, thread.id, s.path);
-        }
-        s.pending = [];
+        // The pending marker becomes the thread's marker.
         s.threadId = thread.id;
         this.plugin.setPending(null);
         this.deleteBtn.show();
@@ -346,7 +343,7 @@ export class SideChat {
 
   private async deleteThread() {
     const s = this.state;
-    if (!s?.threadId || !confirm("删除这条划线和它的提问记录？")) return;
+    if (!s?.threadId || !confirm("删除这条提问记录？（笔记内容不受影响）")) return;
     const id = s.threadId;
     this.close();
     await this.plugin.deleteThread(s.path, id);

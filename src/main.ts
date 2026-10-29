@@ -1,12 +1,13 @@
 import type { EditorView } from "@codemirror/view";
-import { App, MarkdownView, Notice, Plugin, PluginSettingTab, setIcon, Setting } from "obsidian";
+import { App, debounce, MarkdownView, Notice, Plugin, PluginSettingTab, setIcon, Setting } from "obsidian";
 import { findClaude, type AgentConfig, type ChatMessage, type Effort } from "./agent";
-import { anchorFromRange, blockOf, locateAnchor, markAnchor, unmark, type Anchor } from "./anchors";
-import { anchorFromEditor, anchorFromSource, editorView, marksExtension, refreshAllEditors } from "./editor";
+import { lineOf, lineSpan, locate, sourceAnchor, sourceOffsetIn, type Anchor, type SourceRange } from "./anchors";
+import { editorView, marksExtension, refreshAllEditors } from "./editor";
 import { closeDropdown } from "./ui";
 import { GuideJobs, type GuideJob } from "./jobs";
+import { decoratePreview, layoutMarks, previewSections, sectionAt, type NoteMark } from "./marks";
 import { NewGuideModal } from "./modal";
-import { project } from "./plaintext";
+import { project, type Projection } from "./plaintext";
 import { SideChat, visibleMarks } from "./sidechat";
 import { AgentView, VIEW_TYPE } from "./view";
 
@@ -47,7 +48,7 @@ interface PluginData {
 interface Selected {
   path: string;
   anchor: Anchor;
-  block: HTMLElement | null; // reading view block; null in editing view
+  inEditor: boolean;
   rect: { left: number; top: number; bottom: number };
 }
 
@@ -74,7 +75,9 @@ export default class StudyAgentPlugin extends Plugin {
   private sideChat!: SideChat;
   private askBtn!: HTMLElement;
   private selection: Selected | null = null;
-  private pending: { path: string; anchor: Anchor } | null = null; // editing-view selection awaiting its first question
+  private pending: { path: string; anchor: Anchor } | null = null; // selection awaiting its first question
+  private activeThread: string | null = null; // thread open in the side chat
+  private anchorsUpgraded = false;
 
   async onload() {
     const saved = (await this.loadData()) ?? {};
@@ -123,22 +126,12 @@ export default class StudyAgentPlugin extends Plugin {
       },
     });
 
-    // Reading view: draw the dashed marks whenever a block of a note renders.
-    this.registerMarkdownPostProcessor((el, ctx) => {
-      const path = ctx.sourcePath;
-      if (!this.data.threads[path]?.length) return;
-      const apply = () => {
-        for (const t of this.data.threads[path] ?? []) {
-          if (el.querySelector(`.sa-mark[data-tid="${t.id}"]`)) continue;
-          markAnchor(el, t.anchor, () => this.decorateMark(createSpan({ cls: "sa-mark" }), t.id, path));
-        }
-      };
-      apply();
-      // Callouts fill in their body after post-processors run, so look again shortly.
-      window.setTimeout(apply, 0);
-      window.setTimeout(apply, 300);
+    // Reading view: put the left-margin markers back whenever blocks of a note render.
+    this.registerMarkdownPostProcessor((_el, ctx) => {
+      if (this.data.threads[ctx.sourcePath]?.length || this.pending?.path === ctx.sourcePath) this.decorateSoon();
     });
-    // Editing view: the same marks as editor decorations.
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.decorateSoon()));
+    // Editing view: the same markers as a CodeMirror layer.
     this.registerEditorExtension(marksExtension(this));
 
     this.sideChat = new SideChat(this);
@@ -156,7 +149,7 @@ export default class StudyAgentPlugin extends Plugin {
       this.sideChat.el.remove();
       this.askBtn.remove();
       closeDropdown();
-      unmark(document.querySelectorAll<HTMLElement>(".sa-mark"));
+      document.querySelectorAll(".sa-gm").forEach((m) => m.remove());
     });
     this.askBtn.addEventListener("mousedown", (e) => e.preventDefault()); // keep the selection
     askHere.addEventListener("click", () => {
@@ -178,24 +171,45 @@ export default class StudyAgentPlugin extends Plugin {
       const target = e.target as HTMLElement;
       if (!this.askBtn.contains(target)) this.hideAsk();
       // A conversation stays open while you read on; an unasked selection goes away.
-      if (this.sideChat.isIdle && !this.sideChat.contains(target) && !target.closest?.(".sa-mark, .sa-thread, .sa-dropdown, .modal-container, .menu")) {
+      if (this.sideChat.isIdle && !this.sideChat.contains(target) && !target.closest?.(".sa-gm, .sa-thread, .sa-dropdown, .modal-container, .menu")) {
         this.sideChat.close();
       }
     });
+    // A marker is not text: keep the editor from moving the cursor or starting a selection on it.
+    this.registerDomEvent(
+      document,
+      "mousedown",
+      (e) => {
+        if (!(e.target as HTMLElement).closest?.(".sa-gm[data-tid]")) return;
+        e.preventDefault();
+        e.stopPropagation();
+      },
+      { capture: true },
+    );
     this.registerDomEvent(document, "click", (e) => {
-      const mark = (e.target as HTMLElement).closest?.(".sa-mark[data-tid]") as HTMLElement | null;
-      if (!mark || !window.getSelection()?.isCollapsed) return;
+      const mark = (e.target as HTMLElement).closest?.(".sa-gm[data-tid]") as HTMLElement | null;
+      if (!mark) return;
+      e.stopPropagation();
       this.sideChat.openThread(mark.dataset.path!, mark.dataset.tid!);
     });
     this.registerDomEvent(document, "mouseover", (e) => {
-      const mark = (e.target as HTMLElement).closest?.(".sa-mark[data-tid]") as HTMLElement | null;
-      document.querySelectorAll(".sa-mark.sa-hover").forEach((m) => m.removeClass("sa-hover"));
-      if (mark) document.querySelectorAll(`.sa-mark[data-tid="${mark.dataset.tid}"]`).forEach((m) => m.addClass("sa-hover"));
+      const mark = (e.target as HTMLElement).closest?.(".sa-gm[data-tid]") as HTMLElement | null;
+      document.querySelectorAll(".sa-gm.is-hover").forEach((m) => m.removeClass("is-hover"));
+      if (mark) document.querySelectorAll(`.sa-gm[data-tid="${mark.dataset.tid}"]`).forEach((m) => m.addClass("is-hover"));
     });
     this.registerDomEvent(document, "keydown", (e) => {
       if (e.key === "Escape" && this.sideChat.isOpen) this.sideChat.close();
     });
-    this.registerDomEvent(document, "scroll", () => this.sideChat.position(), { capture: true });
+    this.registerDomEvent(
+      document,
+      "scroll",
+      (e) => {
+        this.sideChat.position();
+        // reading view attaches blocks as they scroll in; extend the markers to them
+        if ((e.target as HTMLElement).closest?.(".markdown-reading-view")) this.decorateSoon();
+      },
+      { capture: true },
+    );
     this.registerDomEvent(window, "resize", () => this.sideChat.position());
 
     // Keep per-note data attached to the note when it is renamed or deleted.
@@ -223,8 +237,7 @@ export default class StudyAgentPlugin extends Plugin {
 
     // Notes already open were rendered before this plugin's marks existed.
     this.app.workspace.onLayoutReady(async () => {
-      this.rerenderPreviews();
-      this.refreshEditors();
+      this.refreshMarks();
       // A sidebar restored at startup is not always opened; make sure it is set up.
       for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
         await leaf.loadIfDeferred();
@@ -261,7 +274,7 @@ export default class StudyAgentPlugin extends Plugin {
     const thread: Thread = { id: Math.random().toString(36).slice(2, 10), anchor, messages, createdAt: new Date().toISOString() };
     (this.data.threads[path] ??= []).push(thread);
     await this.save();
-    this.refreshEditors();
+    this.refreshMarks();
     this.refreshViews();
     return thread;
   }
@@ -274,9 +287,8 @@ export default class StudyAgentPlugin extends Plugin {
 
   async deleteThread(path: string, id: string) {
     this.data.threads[path] = (this.data.threads[path] ?? []).filter((t) => t.id !== id);
-    unmark(document.querySelectorAll<HTMLElement>(`.markdown-reading-view .sa-mark[data-tid="${id}"]`));
     await this.save();
-    this.refreshEditors();
+    this.refreshMarks();
     this.refreshViews();
   }
 
@@ -289,17 +301,42 @@ export default class StudyAgentPlugin extends Plugin {
       .join("\n\n");
   }
 
-  /** For the editor extension: what to mark in this note. */
-  marksFor(path: string) {
-    const marks: { id: string | null; anchor: Anchor }[] = (this.data.threads[path] ?? []).map((t) => ({ id: t.id, anchor: t.anchor }));
-    if (this.pending?.path === path) marks.push({ id: null, anchor: this.pending.anchor });
-    return marks;
+  /** What to mark in this note: its threads, plus a selection waiting for its first question. */
+  marksFor(path: string, doc: string): NoteMark[] {
+    let proj: Projection | undefined;
+    const lazyProj = () => (proj ??= project(doc));
+    const found: Parameters<typeof layoutMarks>[1] = [];
+    for (const t of this.data.threads[path] ?? []) {
+      const range = locate(doc, t.anchor, lazyProj);
+      if (!range) continue;
+      if (t.anchor.v !== 2) {
+        // saved by an older version (rendered text): store it as source from now on
+        const upgraded = sourceAnchor(doc, range.from, range.to);
+        if (upgraded) {
+          t.anchor = upgraded.anchor;
+          this.anchorsUpgraded = true;
+          this.saveUpgradedSoon();
+        }
+      }
+      found.push({ ...range, id: t.id, state: t.id === this.activeThread ? "active" : "" });
+    }
+    if (this.pending?.path === path) {
+      const range = locate(doc, this.pending.anchor);
+      if (range) found.push({ ...range, id: null, state: "pending" });
+    }
+    return layoutMarks(doc, found);
   }
+
+  private saveUpgradedSoon = debounce(() => {
+    if (!this.anchorsUpgraded) return;
+    this.anchorsUpgraded = false;
+    this.save();
+  }, 2000);
 
   setPending(p: { path: string; anchor: Anchor } | null) {
     if (!p && !this.pending) return;
     this.pending = p;
-    this.refreshEditors();
+    this.refreshMarks();
   }
 
   pushUndo(path: string, content: string) {
@@ -308,21 +345,15 @@ export default class StudyAgentPlugin extends Plugin {
     if (stack.length > MAX_UNDO) stack.shift();
   }
 
-  decorateMark(span: HTMLElement, threadId: string, path: string): HTMLElement {
-    span.dataset.tid = threadId;
-    span.dataset.path = path;
-    span.setAttr("aria-label", "查看提问记录");
-    return span;
-  }
-
   setActiveMark(threadId: string | null) {
-    document.querySelectorAll(".sa-mark.sa-active").forEach((m) => m.removeClass("sa-active"));
-    if (threadId) document.querySelectorAll(`.sa-mark[data-tid="${threadId}"]`).forEach((m) => m.addClass("sa-active"));
+    if (this.activeThread === threadId) return;
+    this.activeThread = threadId;
+    this.refreshMarks();
   }
 
   /** From the sidebar list: bring the passage on screen and open its thread. */
   async revealThread(path: string, id: string) {
-    const selector = `.sa-mark[data-tid="${id}"]`;
+    const selector = `.sa-gm[data-tid="${id}"]`;
     let mark = visibleMarks(selector)[0];
     // The sidebar has focus here, so find the note's own view rather than the active one.
     const view = this.app.workspace
@@ -330,17 +361,17 @@ export default class StudyAgentPlugin extends Plugin {
       .map((l) => l.view)
       .find((v): v is MarkdownView => v instanceof MarkdownView && v.file?.path === path);
     const thread = this.getThread(path, id);
-    if (!mark && thread && view?.file?.path === path) {
+    if (!mark && thread && view) {
       // Not rendered yet (both views only render near the viewport): scroll to its line first.
       const src = view.getViewData();
-      const proj = project(src);
-      const where = locateAnchor(proj.text, thread.anchor);
+      const where = locate(src, thread.anchor);
       if (where) {
-        const line = src.slice(0, proj.toSrc[where.start]).split("\n").length - 1;
+        const line = lineOf(src, where.from);
         if (view.getMode() === "preview") view.previewMode.applyScroll(Math.max(0, line - 3));
         else view.editor.scrollIntoView({ from: { line, ch: 0 }, to: { line, ch: 0 } }, true);
         for (let i = 0; i < 10 && !mark; i++) {
           await sleep(100);
+          this.decoratePreviews();
           mark = visibleMarks(selector)[0];
         }
       }
@@ -355,48 +386,47 @@ export default class StudyAgentPlugin extends Plugin {
     return this.app.workspace.getActiveViewOfType(MarkdownView);
   }
 
-  /** The current selection in the active note, in either reading or editing view. */
+  /**
+   * The current selection in the active note, in either reading or editing view,
+   * as a range of the note's Markdown. A selection that runs through formulas,
+   * tables or callouts takes in their source too.
+   */
   private readSelection(): Selected | null {
     const view = this.activeNoteView();
     if (!view?.file) return null;
     const path = view.file.path;
+    const doc = view.getViewData();
+    let proj: Projection | undefined;
+    const lazyProj = () => (proj ??= project(doc));
 
     const domSel = window.getSelection();
     const range = domSel && !domSel.isCollapsed && domSel.rangeCount ? domSel.getRangeAt(0) : null;
     const onScreen = range && view.contentEl.contains(range.commonAncestorContainer) ? range : null;
+    let from: number | null;
+    let to: number | null;
+    let rect = onScreen ? lastRect(onScreen) : { left: 0, top: 0, bottom: 0 };
 
     if (view.getMode() === "source") {
-      if (!onScreen) {
-        // keyboard selection that the DOM does not mirror
-        const sel = anchorFromEditor(view.editor);
-        return sel ? { path, anchor: sel.anchor, block: null, rect: sel.rect } : null;
-      }
-      // Live Preview draws callouts, tables and embeds as rendered widgets: a selection
-      // there is in rendered text, so anchor it like reading view does.
-      const widget = onScreen.startContainer.parentElement?.closest<HTMLElement>(".cm-content [contenteditable=false]");
-      if (widget) return this.fromRenderedRange(path, widget, onScreen);
       const cm = editorView(view.editor);
-      if (!cm) return null;
-      const res = anchorFromSource(
-        view.editor.getValue(),
-        cm.posAtDOM(onScreen.startContainer, onScreen.startOffset),
-        cm.posAtDOM(onScreen.endContainer, onScreen.endOffset),
-      );
-      return res ? { path, anchor: res.anchor, block: null, rect: lastRect(onScreen) } : null;
+      if (!onScreen || !cm) {
+        // keyboard selection that the DOM does not mirror
+        if (!view.editor.somethingSelected()) return null;
+        from = view.editor.posToOffset(view.editor.getCursor("from"));
+        to = view.editor.posToOffset(view.editor.getCursor("to"));
+        const c = cm?.coordsAtPos(to);
+        if (c) rect = { left: c.right, top: c.top, bottom: c.bottom };
+      } else {
+        from = editorOffset(cm, lazyProj, onScreen.startContainer, onScreen.startOffset, "start");
+        to = editorOffset(cm, lazyProj, onScreen.endContainer, onScreen.endOffset, "end");
+      }
+    } else {
+      if (!onScreen) return null;
+      from = previewOffset(view, doc, lazyProj, onScreen, "start");
+      to = previewOffset(view, doc, lazyProj, onScreen, "end");
     }
-
-    if (!onScreen) return null;
-    const block = blockOf(onScreen.startContainer);
-    return block ? this.fromRenderedRange(path, block, onScreen) : null;
-  }
-
-  /** A selection in rendered text (a reading-view block or a Live Preview widget). */
-  private fromRenderedRange(path: string, block: HTMLElement, range: Range): Selected | null {
-    // A question is about one block; clip a selection that runs past it.
-    const clipped = range.cloneRange();
-    if (!block.contains(range.endContainer)) clipped.setEnd(block, block.childNodes.length);
-    const anchor = anchorFromRange(block, clipped);
-    return anchor ? { path, anchor, block, rect: lastRect(clipped) } : null;
+    if (from === null || to === null) return null;
+    const res = sourceAnchor(doc, Math.min(from, to), Math.max(from, to));
+    return res ? { path, anchor: res.anchor, inEditor: view.getMode() === "source", rect } : null;
   }
 
   private onSelectionEnd(target: Node | null) {
@@ -415,25 +445,25 @@ export default class StudyAgentPlugin extends Plugin {
   }
 
   private ask(sel: Selected) {
-    window.getSelection()?.removeAllRanges();
-    if (!sel.block) {
-      // collapse the editor selection so the pending mark is visible
-      const editor = this.activeNoteView()?.editor;
-      editor?.setCursor(editor.getCursor("to"));
-    }
-    this.sideChat.openNew(sel.path, sel.anchor, sel.block, sel.rect);
+    this.clearSelection(sel);
+    this.sideChat.openNew(sel.path, sel.anchor, sel.rect);
   }
 
   private async quoteToAgent(sel: Selected) {
-    window.getSelection()?.removeAllRanges();
-    const editor = sel.block ? null : this.activeNoteView()?.editor;
-    editor?.setCursor(editor.getCursor("to"));
+    this.clearSelection(sel);
     await this.revealAgentView();
     const view = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0]?.view;
     if (view instanceof AgentView) {
       if (!view.ready) await view.onOpen();
       view.addQuote(sel.path, sel.anchor);
     }
+  }
+
+  /** Drop the text selection once it has been used, so the marker shows. */
+  private clearSelection(sel: Selected) {
+    window.getSelection()?.removeAllRanges();
+    const editor = sel.inEditor ? this.activeNoteView()?.editor : null;
+    editor?.setCursor(editor.getCursor("to"));
   }
 
   private hideAsk() {
@@ -452,15 +482,21 @@ export default class StudyAgentPlugin extends Plugin {
     return views;
   }
 
-  refreshEditors() {
+  /** Redraw the markers in every open note, in both views. */
+  refreshMarks() {
     refreshAllEditors(this.editorViews());
+    this.decoratePreviews();
   }
 
-  private rerenderPreviews() {
+  private decoratePreviews() {
     for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-      if (leaf.view instanceof MarkdownView && leaf.view.getMode() === "preview") leaf.view.previewMode.rerender(true);
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || view.getMode() !== "preview" || !view.file) continue;
+      decoratePreview(view, this.marksFor(view.file.path, view.getViewData()));
     }
   }
+
+  private decorateSoon = debounce(() => this.decoratePreviews(), 60);
 
   refreshViews() {
     // A sidebar leaf that has never been shown holds a deferred placeholder view.
@@ -500,10 +536,47 @@ export default class StudyAgentPlugin extends Plugin {
   }
 }
 
+/** Source offset of a selection endpoint in the editor. */
+function editorOffset(cm: EditorView, proj: () => Projection, node: Node, offset: number, side: "start" | "end"): number {
+  // Live Preview draws formulas, tables and callouts as widgets; find the outermost one around the endpoint.
+  let widget: HTMLElement | null = null;
+  for (let el = node instanceof HTMLElement ? node : node.parentElement; el && el !== cm.contentDOM; el = el.parentElement) {
+    if (el.contentEditable === "false") widget = el;
+  }
+  if (!widget) return cm.posAtDOM(node, offset);
+  const line = widget.closest<HTMLElement>(".cm-line");
+  if (line) {
+    // an inline widget (formula) inside an ordinary line
+    const l = cm.state.doc.lineAt(cm.posAtDOM(line, 0));
+    return sourceOffsetIn(line, { from: l.from, to: l.to }, proj(), node, offset, side);
+  }
+  // a block widget: map within the source it renders
+  const start = cm.posAtDOM(widget, 0);
+  const block = cm.lineBlockAt(start);
+  const range = { from: Math.min(block.from, start), to: Math.max(block.to, cm.posAtDOM(widget, widget.childNodes.length)) };
+  return sourceOffsetIn(widget, range, proj(), node, offset, side);
+}
+
+/** Source offset of a selection endpoint in reading view. */
+function previewOffset(view: MarkdownView, doc: string, proj: () => Projection, range: Range, side: "start" | "end"): number | null {
+  const node = side === "start" ? range.startContainer : range.endContainer;
+  const offset = side === "start" ? range.startOffset : range.endOffset;
+  const section = sectionAt(view, node);
+  if (section) return sourceOffsetIn(section.el, lineSpan(doc, ...section.lines), proj(), node, offset, side);
+  // The endpoint is between blocks: use the first / last block the selection touches.
+  const touched = (previewSections(view) ?? []).filter((s) => s.el.isConnected && range.intersectsNode(s.el));
+  const s = side === "start" ? touched[0] : touched[touched.length - 1];
+  if (!s) return null;
+  const span: SourceRange = lineSpan(doc, s.start.line, s.end.line);
+  return side === "start" ? span.from : span.to;
+}
+
+/** Where the selection ends (for the toolbar), and where it starts vertically (so the card can sit above all of it). */
 function lastRect(range: Range) {
   const rects = range.getClientRects();
-  const r = rects[rects.length - 1] ?? range.getBoundingClientRect();
-  return { left: r.right, top: r.top, bottom: r.bottom };
+  const whole = range.getBoundingClientRect();
+  const r = rects[rects.length - 1] ?? whole;
+  return { left: r.right, top: whole.top, bottom: r.bottom };
 }
 
 /** Saved settings, carrying the old single `model` setting over to the per-place pickers. */

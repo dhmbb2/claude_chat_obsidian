@@ -50,26 +50,76 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ---------- dashed marks on passages with questions ---------- */
-.sa-mark {
-  text-decoration-line: underline;
-  text-decoration-style: dashed;
-  text-decoration-color: var(--sa-faint);
-  text-decoration-thickness: 1px;
-  text-underline-offset: 0.32em;
-  text-decoration-skip-ink: none;
-  border-radius: 3px;
+/* ---------- left-margin markers on passages with questions ---------- */
+/* A thin bar beside the lines a passage spans, with a small icon at its top.
+   Editing view draws them in a CodeMirror layer, reading view in an overlay
+   inside its scroller. */
+.sa-gm {
+  position: absolute;
+  width: 16px;
+  z-index: 3;
   cursor: pointer;
-  transition: background-color 120ms ease, text-decoration-color 120ms ease;
 }
-.sa-mark.sa-hover {
-  background-color: var(--sa-accent-softer);
-  text-decoration-color: var(--sa-accent);
+.markdown-preview-view:has(> .sa-gm-overlay) {
+  position: relative;
 }
-.sa-mark.sa-active,
-.sa-mark.sa-pending {
-  background-color: var(--sa-accent-soft);
-  text-decoration-color: var(--sa-accent);
+.sa-gm-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+}
+.sa-gm-bar {
+  position: absolute;
+  left: 7px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--sa-border-strong);
+  transition: background-color 120ms ease;
+}
+.sa-gm-icon {
+  position: absolute;
+  left: 0;
+  top: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  color: var(--sa-faint);
+  background: var(--sa-bg);
+  transition: color 120ms ease;
+}
+.sa-gm-icon svg {
+  width: 12px;
+  height: 12px;
+}
+.sa-gm:has(.sa-gm-icon) > .sa-gm-bar {
+  top: 20px; /* below the icon */
+}
+.sa-gm.is-hover .sa-gm-bar,
+.sa-gm:hover .sa-gm-bar {
+  background: var(--sa-accent);
+}
+.sa-gm.is-hover .sa-gm-icon,
+.sa-gm:hover .sa-gm-icon {
+  color: var(--sa-accent);
+}
+.sa-gm.is-active .sa-gm-bar,
+.sa-gm.is-pending .sa-gm-bar {
+  background: var(--sa-accent);
+}
+.sa-gm.is-active .sa-gm-icon,
+.sa-gm.is-pending .sa-gm-icon {
+  color: #fff;
+  background: var(--sa-accent);
+}
+.sa-gm.is-pending {
+  cursor: default;
 }
 
 /* ---------- "问 Claude" selection button ---------- */
@@ -479,7 +529,7 @@ body {
   flex: 1;
   min-width: 0;
   padding-left: 8px;
-  border-left: 2px dashed var(--sa-accent);
+  border-left: 2px solid var(--sa-accent);
   color: var(--sa-muted);
   font-family: var(--sa-serif);
   font-size: 13px;
@@ -491,8 +541,18 @@ body {
 }
 .sa-quote.is-full {
   white-space: normal;
-  max-height: 5.6em;
+  max-height: 14em;
   overflow-y: auto;
+  cursor: zoom-out;
+}
+.sa-quote.is-full .markdown-rendered > :first-child {
+  margin-top: 0;
+}
+.sa-quote.is-full .markdown-rendered > :last-child {
+  margin-bottom: 0;
+}
+.sa-quote.is-full .markdown-rendered {
+  font-size: 13px;
 }
 .sa-card-bar:has(.sa-quote.is-full) {
   height: auto;

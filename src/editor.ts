@@ -1,83 +1,84 @@
-// Editing view (Live Preview / source): dashed marks as CodeMirror decorations,
-// and turning an editor selection into an anchor.
-import { RangeSetBuilder, StateEffect } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+// Editing view (Live Preview / source): the left-margin markers, drawn as a
+// CodeMirror layer from line-block geometry, so a passage that runs through a
+// rendered table, formula or callout is covered just like plain lines.
+import { StateEffect } from "@codemirror/state";
+import { EditorView, layer, type LayerMarker, type ViewUpdate } from "@codemirror/view";
 import { editorInfoField, type Editor } from "obsidian";
-import { anchorFromText, locateAnchor, type Anchor } from "./anchors";
-import { plainIndex, project } from "./plaintext";
+import { markerEl, markerX, type MarkSource, type NoteMark } from "./marks";
 
 export const refreshMarks = StateEffect.define<null>();
 
-export interface MarkSource {
-  /** Threads (and a pending, not-yet-asked selection) to mark in this note. */
-  marksFor(path: string): { id: string | null; anchor: Anchor }[];
+class Marker implements LayerMarker {
+  constructor(
+    readonly mark: NoteMark,
+    readonly path: string,
+    readonly left: number,
+    readonly top: number,
+    readonly height: number,
+  ) {}
+
+  draw() {
+    const el = markerEl(this.mark, this.path, true);
+    this.place(el);
+    return el;
+  }
+
+  update(el: HTMLElement, prev: Marker) {
+    if (prev.mark.id !== this.mark.id || prev.mark.state !== this.mark.state || prev.path !== this.path) return false;
+    this.place(el);
+    return true;
+  }
+
+  eq(o: Marker) {
+    return (
+      o.mark.id === this.mark.id &&
+      o.mark.state === this.mark.state &&
+      o.path === this.path &&
+      o.left === this.left &&
+      o.top === this.top &&
+      o.height === this.height
+    );
+  }
+
+  private place(el: HTMLElement) {
+    el.style.left = `${this.left}px`;
+    el.style.top = `${this.top}px`;
+    el.style.height = `${this.height}px`;
+  }
 }
 
 export function marksExtension(source: MarkSource) {
-  return ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
-      constructor(view: EditorView) {
-        this.decorations = build(view, source);
-      }
-      update(u: ViewUpdate) {
-        if (u.docChanged || u.transactions.some((t) => t.effects.some((e) => e.is(refreshMarks)))) {
-          this.decorations = build(u.view, source);
-        }
-      }
+  return layer({
+    above: true,
+    class: "sa-gm-layer", // one class: CodeMirror passes it to classList.add
+    update: (u: ViewUpdate) =>
+      u.docChanged ||
+      u.viewportChanged ||
+      u.geometryChanged ||
+      u.heightChanged ||
+      u.transactions.some((t) => t.effects.some((e) => e.is(refreshMarks))),
+    markers(view: EditorView) {
+      const path = view.state.field(editorInfoField, false)?.file?.path;
+      if (!path) return [];
+      const marks = source.marksFor(path, view.state.doc.toString());
+      if (!marks.length) return [];
+      // Layer coordinates start at the scroller's scrolled content origin.
+      const scroller = view.scrollDOM.getBoundingClientRect();
+      const baseLeft = scroller.left - view.scrollDOM.scrollLeft;
+      const baseTop = scroller.top - view.scrollDOM.scrollTop;
+      const contentLeft = view.contentDOM.getBoundingClientRect().left;
+      return marks.map((m) => {
+        const first = view.lineBlockAt(m.from);
+        const last = view.lineBlockAt(Math.max(m.from, m.to - 1));
+        const top = view.documentTop + first.top - baseTop;
+        return new Marker(m, path, contentLeft - baseLeft - markerX(m.lane), top, view.documentTop + last.bottom - baseTop - top);
+      });
     },
-    { decorations: (v) => v.decorations },
-  );
-}
-
-function build(view: EditorView, source: MarkSource): DecorationSet {
-  const builder = new RangeSetBuilder<Decoration>();
-  const path = view.state.field(editorInfoField, false)?.file?.path;
-  const marks = path ? source.marksFor(path) : [];
-  if (!path || !marks.length) return builder.finish();
-
-  const proj = project(view.state.doc.toString());
-  const ranges: { from: number; to: number; deco: Decoration }[] = [];
-  for (const m of marks) {
-    const where = locateAnchor(proj.text, m.anchor);
-    if (!where) continue;
-    const deco = Decoration.mark({
-      class: m.id ? "sa-mark" : "sa-mark sa-pending",
-      attributes: m.id ? { "data-tid": m.id, "data-path": path, "aria-label": "查看提问记录" } : {},
-    });
-    ranges.push({ from: proj.toSrc[where.start], to: proj.toSrc[where.end - 1] + 1, deco });
-  }
-  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-  for (const r of ranges) builder.add(r.from, r.to, r.deco);
-  return builder.finish();
-}
-
-/** Anchor for source range [from, to) of a note, clipped to its first line, with context from that line. */
-export function anchorFromSource(doc: string, from: number, to: number): { anchor: Anchor; endSrc: number } | null {
-  const proj = project(doc);
-  const start = plainIndex(proj, from);
-  const lineStart = proj.text.lastIndexOf("\n", start - 1) + 1;
-  const nl = proj.text.indexOf("\n", start);
-  const lineEnd = nl === -1 ? proj.text.length : nl;
-  const end = Math.min(plainIndex(proj, to), lineEnd);
-  const anchor = end > start ? anchorFromText(proj.text, start, end, lineStart, lineEnd) : null;
-  return anchor ? { anchor, endSrc: proj.toSrc[end - 1] + 1 } : null;
+  });
 }
 
 export function editorView(editor: Editor): EditorView | undefined {
   return (editor as unknown as { cm?: EditorView }).cm;
-}
-
-/** The editor's own selection (e.g. made with the keyboard) as an anchor, plus where to show the ask button. */
-export function anchorFromEditor(editor: Editor): { anchor: Anchor; rect: { left: number; top: number; bottom: number } } | null {
-  if (!editor.somethingSelected()) return null;
-  const from = editor.posToOffset(editor.getCursor("from"));
-  const to = editor.posToOffset(editor.getCursor("to"));
-  const res = anchorFromSource(editor.getValue(), from, to);
-  if (!res) return null;
-  const coords = editorView(editor)?.coordsAtPos(res.endSrc);
-  const rect = coords ? { left: coords.right, top: coords.top, bottom: coords.bottom } : { left: 0, top: 0, bottom: 0 };
-  return { anchor: res.anchor, rect };
 }
 
 export function refreshAllEditors(views: EditorView[]) {
