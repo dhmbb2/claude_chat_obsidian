@@ -19,7 +19,7 @@ export class AgentView extends ItemView {
   private tab: Tab = "chat";
   private busyPath: string | null = null;
   private renderComponent = new Component();
-  private titleEl!: HTMLElement;
+  private noteTitleEl!: HTMLElement; // not `titleEl`: that is ItemView's own header element
   private moreBtn!: HTMLElement;
   private chatTab!: HTMLElement;
   private threadsTab!: HTMLElement;
@@ -63,7 +63,7 @@ export class AgentView extends ItemView {
 
     const head = root.createDiv({ cls: "sa-view-head" });
     const titleRow = head.createDiv({ cls: "sa-view-title-row" });
-    this.titleEl = titleRow.createDiv({ cls: "sa-view-title" });
+    this.noteTitleEl = titleRow.createDiv({ cls: "sa-view-title" });
     this.moreBtn = iconButton(titleRow, "more-horizontal", "更多", () => this.openMenu());
     const tabs = head.createDiv({ cls: "sa-tabs" });
     this.chatTab = tabs.createDiv({ cls: "sa-tab", text: "对话" });
@@ -116,7 +116,7 @@ export class AgentView extends ItemView {
   }
 
   render() {
-    this.titleEl.setText(this.file ? this.file.basename : "学习助手");
+    this.noteTitleEl.setText(this.file ? this.file.basename : "学习助手");
     this.renderChat();
     this.renderThreads();
     this.renderJobs();
